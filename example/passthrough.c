@@ -51,6 +51,97 @@
 
 int key_count;
 char ** key_list;
+int key_check[100];
+char *pd;
+int init_over;
+
+static int remove_dir(const char *dir)
+{
+    char cur_dir[] = ".";
+    char up_dir[] = "..";
+    char dir_name[128];
+    DIR *dirp;
+    struct dirent *dp;
+    struct stat dir_stat;
+
+    if ( 0 != access(dir, F_OK) ) {
+        return 0;
+    }
+
+    if ( 0 > lstat(dir, &dir_stat) ) {
+        perror("get directory stat error");
+        return -1;
+    }
+
+    if ( S_ISREG(dir_stat.st_mode) ) {  
+        remove(dir);
+    } else if ( S_ISDIR(dir_stat.st_mode) ) {   
+        dirp = opendir(dir);
+        while ( (dp=readdir(dirp)) != NULL ) {
+            if ( (0 == strcmp(cur_dir, dp->d_name)) || (0 == strcmp(up_dir, dp->d_name)) ) {
+                continue;
+            }
+
+            sprintf(dir_name, "%s/%s", dir, dp->d_name);
+            remove_dir(dir_name);  
+        }
+        closedir(dirp);
+
+        rmdir(dir);     
+    } else {
+        perror("unknow file type!");    
+    }
+    return 0;
+}
+
+static void getnewpath(char *tmp, const char *path, char *pd) {
+	int a1 = strlen(path);
+	int a2 = strlen(pd);
+	memset(tmp , 0, a1+a2+1);
+	for(int i =0; i<a1+a2; i++)
+		if (i < a2) tmp[i] = pd[i];
+		else tmp[i] = path[i-a2];
+}
+
+static int is_accessible(const char *path)
+{
+	if (!init_over)	return 1;
+	int i, j, k, l;
+	l = strlen(path);
+	if (l == 1)	return 1;
+	char *tmp = malloc(sizeof(char) * (l + 1));
+	for (i = 0, j = 0; i < l; i++, j++)
+	{
+		if (i == 0 && path[i] == '/')	
+		{
+			j--;
+			continue;
+		}
+		if (path[i] == '/')	break;
+		else	tmp[j] = path[i];
+	}
+	tmp[j] = '\0';
+	for (k = 0, i = 0; i < key_count; i++)
+		if (strcmp(key_list[i], tmp) == 0)
+		{
+			k = 1;
+			break;
+		}
+	return k;
+}
+
+static int is_key_directory(const char *path)
+{
+	if (!init_over)	return 1;
+	int i, k, l;
+	l = strlen(path);
+	for (i = 1, k = 0; i < l; i++)
+	{
+		if (path[i] == '/') k ++;
+		if (k >= 1 && path[i] != '\0')	return 1;
+	}
+	return 0;
+}
 
 static void *xmp_init(struct fuse_conn_info *conn,
 		      struct fuse_config *cfg)
@@ -78,8 +169,13 @@ static int xmp_getattr(const char *path, struct stat *stbuf,
 	(void) fi;
 	int res;
 
-	//printf("%s\n", path);
-	res = lstat(path, stbuf);
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	res = lstat(tmp, stbuf);
 	if (res == -1)
 		return -errno;
 
@@ -90,7 +186,15 @@ static int xmp_access(const char *path, int mask)
 {
 	int res;
 
-	res = access(path, mask);
+	if (!is_accessible(path))
+		return -EACCES;
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	res = access(tmp, mask);
 	if (res == -1)
 		return -errno;
 
@@ -101,7 +205,13 @@ static int xmp_readlink(const char *path, char *buf, size_t size)
 {
 	int res;
 
-	res = readlink(path, buf, size - 1);
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	res = readlink(tmp, buf, size - 1);
 	if (res == -1)
 		return -errno;
 
@@ -121,7 +231,13 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	(void) fi;
 	(void) flags;
 
-	dp = opendir(path);
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	dp = opendir(tmp);
 	if (dp == NULL)
 		return -errno;
 
@@ -141,17 +257,26 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 static int xmp_mknod(const char *path, mode_t mode, dev_t rdev)
 {
 	int res;
+	
+	if (!is_accessible(path))
+		return -EACCES;
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
 
 	/* On Linux this could just be 'mknod(path, mode, rdev)' but this
 	   is more portable */
 	if (S_ISREG(mode)) {
-		res = open(path, O_CREAT | O_EXCL | O_WRONLY, mode);
+		res = open(tmp, O_CREAT | O_EXCL | O_WRONLY, mode);
 		if (res >= 0)
 			res = close(res);
 	} else if (S_ISFIFO(mode))
-		res = mkfifo(path, mode);
+		res = mkfifo(tmp, mode);
 	else
-		res = mknod(path, mode, rdev);
+		res = mknod(tmp, mode, rdev);
 	if (res == -1)
 		return -errno;
 
@@ -162,7 +287,15 @@ static int xmp_mkdir(const char *path, mode_t mode)
 {
 	int res;
 
-	res = mkdir(path, mode);
+	if (!is_accessible(path))
+		return -EACCES;
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	res = mkdir(tmp, mode);
 	if (res == -1)
 		return -errno;
 
@@ -173,7 +306,17 @@ static int xmp_unlink(const char *path)
 {
 	int res;
 
-	res = unlink(path);
+	if (!is_accessible(path))
+		return -EACCES;
+	if (!is_key_directory(path))
+		return -EACCES;
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	res = unlink(tmp);
 	if (res == -1)
 		return -errno;
 
@@ -184,7 +327,17 @@ static int xmp_rmdir(const char *path)
 {
 	int res;
 
-	res = rmdir(path);
+	if (!is_accessible(path))
+		return -EACCES;
+	if (!is_key_directory(path))
+		return -EACCES;
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	res = rmdir(tmp);
 	if (res == -1)
 		return -errno;
 
@@ -195,7 +348,22 @@ static int xmp_symlink(const char *from, const char *to)
 {
 	int res;
 
-	res = symlink(from, to);
+	if (!is_accessible(from) || !is_accessible(to))
+		return -EACCES;
+	if (!is_key_directory(from))
+		return -EACCES;
+	char *tmp;
+	int len_from = strlen(from);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_from + 1);
+	getnewpath(tmp, from, pd);
+
+	char *tmp1;
+	int len_to = strlen(to);
+	tmp1 = malloc(len_pd + len_to + 1);
+	getnewpath(tmp1, to, pd);
+
+	res = symlink(tmp, tmp1);
 	if (res == -1)
 		return -errno;
 
@@ -206,10 +374,25 @@ static int xmp_rename(const char *from, const char *to, unsigned int flags)
 {
 	int res;
 
+	if (!is_accessible(from) || !is_accessible(to))
+		return -EACCES;
+	if (!is_key_directory(from) || !is_key_directory(to))
+		return -EACCES;
+	char *tmp;
+	int len_from = strlen(from);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_from + 1);
+	getnewpath(tmp, from, pd);
+
+	char *tmp1;
+	int len_to = strlen(to);
+	tmp1 = malloc(len_pd + len_to + 1);
+	getnewpath(tmp1, to, pd);
+
 	if (flags)
 		return -EINVAL;
 
-	res = rename(from, to);
+	res = rename(tmp, tmp1);
 	if (res == -1)
 		return -errno;
 
@@ -220,7 +403,22 @@ static int xmp_link(const char *from, const char *to)
 {
 	int res;
 
-	res = link(from, to);
+	if (!is_accessible(from) || !is_accessible(to))
+		return -EACCES;
+	if (!is_key_directory(from))
+		return -EACCES;
+	char *tmp;
+	int len_from = strlen(from);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_from + 1);
+	getnewpath(tmp, from, pd);
+
+	char *tmp1;
+	int len_to = strlen(to);
+	tmp1 = malloc(len_pd + len_to + 1);
+	getnewpath(tmp1, to, pd);
+
+	res = link(tmp, tmp1);
 	if (res == -1)
 		return -errno;
 
@@ -233,7 +431,15 @@ static int xmp_chmod(const char *path, mode_t mode,
 	(void) fi;
 	int res;
 
-	res = chmod(path, mode);
+	if (!is_accessible(path))
+		return -EACCES;
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	res = chmod(tmp, mode);
 	if (res == -1)
 		return -errno;
 
@@ -246,7 +452,17 @@ static int xmp_chown(const char *path, uid_t uid, gid_t gid,
 	(void) fi;
 	int res;
 
-	res = lchown(path, uid, gid);
+	if (!is_accessible(path))
+		return -EACCES;
+	if (!is_key_directory(path))
+		return -EACCES;
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	res = lchown(tmp, uid, gid);
 	if (res == -1)
 		return -errno;
 
@@ -258,10 +474,20 @@ static int xmp_truncate(const char *path, off_t size,
 {
 	int res;
 
+	if (!is_accessible(path))
+		return -EACCES;
+	if (!is_key_directory(path))
+		return -EACCES;
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
 	if (fi != NULL)
 		res = ftruncate(fi->fh, size);
 	else
-		res = truncate(path, size);
+		res = truncate(tmp, size);
 	if (res == -1)
 		return -errno;
 
@@ -275,8 +501,14 @@ static int xmp_utimens(const char *path, const struct timespec ts[2],
 	(void) fi;
 	int res;
 
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
 	/* don't use utime/utimes since they follow symlinks */
-	res = utimensat(0, path, ts, AT_SYMLINK_NOFOLLOW);
+	res = utimensat(0, tmp, ts, AT_SYMLINK_NOFOLLOW);
 	if (res == -1)
 		return -errno;
 
@@ -289,7 +521,17 @@ static int xmp_create(const char *path, mode_t mode,
 {
 	int res;
 
-	res = open(path, fi->flags, mode);
+	if (!is_accessible(path))
+		return -EACCES;
+	if (!is_key_directory(path))
+		return -EACCES;
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	res = open(tmp, fi->flags, mode);
 	if (res == -1)
 		return -errno;
 
@@ -301,7 +543,17 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 {
 	int res;
 
-	res = open(path, fi->flags);
+	if (!is_accessible(path))
+		return -EACCES;
+	if (!is_key_directory(path))
+		return -EACCES;
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	res = open(tmp, fi->flags);
 	if (res == -1)
 		return -errno;
 
@@ -315,8 +567,18 @@ static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 	int fd;
 	int res;
 
+	if (!is_accessible(path))
+		return -EACCES;
+	if (!is_key_directory(path))
+		return -EACCES;
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
 	if(fi == NULL)
-		fd = open(path, O_RDONLY);
+		fd = open(tmp, O_RDONLY);
 	else
 		fd = fi->fh;
 	
@@ -338,9 +600,19 @@ static int xmp_write(const char *path, const char *buf, size_t size,
 	int fd;
 	int res;
 
+	if (!is_accessible(path))
+		return -EACCES;
+	if (!is_key_directory(path))
+		return -EACCES;
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
 	(void) fi;
 	if(fi == NULL)
-		fd = open(path, O_WRONLY);
+		fd = open(tmp, O_WRONLY);
 	else
 		fd = fi->fh;
 	
@@ -360,7 +632,13 @@ static int xmp_statfs(const char *path, struct statvfs *stbuf)
 {
 	int res;
 
-	res = statvfs(path, stbuf);
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	res = statvfs(tmp, stbuf);
 	if (res == -1)
 		return -errno;
 
@@ -395,11 +673,17 @@ static int xmp_fallocate(const char *path, int mode,
 
 	(void) fi;
 
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
 	if (mode)
 		return -EOPNOTSUPP;
 
 	if(fi == NULL)
-		fd = open(path, O_WRONLY);
+		fd = open(tmp, O_WRONLY);
 	else
 		fd = fi->fh;
 	
@@ -419,7 +703,13 @@ static int xmp_fallocate(const char *path, int mode,
 static int xmp_setxattr(const char *path, const char *name, const char *value,
 			size_t size, int flags)
 {
-	int res = lsetxattr(path, name, value, size, flags);
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	int res = lsetxattr(tmp, name, value, size, flags);
 	if (res == -1)
 		return -errno;
 	return 0;
@@ -428,7 +718,13 @@ static int xmp_setxattr(const char *path, const char *name, const char *value,
 static int xmp_getxattr(const char *path, const char *name, char *value,
 			size_t size)
 {
-	int res = lgetxattr(path, name, value, size);
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	int res = lgetxattr(tmp, name, value, size);
 	if (res == -1)
 		return -errno;
 	return res;
@@ -436,7 +732,13 @@ static int xmp_getxattr(const char *path, const char *name, char *value,
 
 static int xmp_listxattr(const char *path, char *list, size_t size)
 {
-	int res = llistxattr(path, list, size);
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	int res = llistxattr(tmp, list, size);
 	if (res == -1)
 		return -errno;
 	return res;
@@ -444,7 +746,13 @@ static int xmp_listxattr(const char *path, char *list, size_t size)
 
 static int xmp_removexattr(const char *path, const char *name)
 {
-	int res = lremovexattr(path, name);
+	char *tmp;
+	int len_path = strlen(path);
+	int len_pd = strlen(pd);
+	tmp = malloc(len_pd + len_path + 1);
+	getnewpath(tmp, path, pd);
+
+	int res = lremovexattr(tmp, name);
 	if (res == -1)
 		return -errno;
 	return 0;
@@ -490,16 +798,81 @@ static struct fuse_operations xmp_oper = {
 
 int main(int argc, char *argv[])
 {
-	key_count = argc - 2;
+	/*
+		argc = 2 + 1 + keycount
+		argv:
+			./passthrought.c
+			mountpoint
+			/theplace_real
+			key1
+			key2
+			......
+			key_keycount
+
+	*/
+	init_over = 0;
+
+	memset(key_check, 0 ,sizeof(key_check));
+
+	int length;
+	key_count = argc - 3;
 	key_list = malloc(sizeof(int) * key_count + 1);
-	for (int i = 2; i < argc; i++)
+	for (int i = 3; i < argc; i++)
 	{
-		int length = strlen(argv[i]) + 1;
-		key_list[i-2] = malloc(length);
-		memcpy(key_list[i-2], argv[i], length);
-		printf("%s\n", key_list[i-2]);
+		length = strlen(argv[i]) + 1;
+		key_list[i-3] = malloc(length);
+		memset(key_list[i-3], 0, length);
+		memcpy(key_list[i-3], argv[i], length-1);
+		printf("%s\n", key_list[i-3]);
 	}
 
+
+	length = strlen(argv[2]) + 1;
+	pd = malloc(length);
+	memset(pd , 0, length);
+	memcpy(pd , argv[2], length-1);
+	printf("%s\n", pd);
+
+	struct dirent* ent = NULL;
+	DIR *pDir;
+	pDir = opendir(pd);
+	char tmppath[512];
+	struct stat s;
+	int flag;
+
+	while (NULL != (ent = readdir(pDir)))
+	{
+		if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, ".."))
+			continue;
+
+		sprintf(tmppath, "%s/%s", pd, ent->d_name);
+		printf("%s\n", tmppath);
+		lstat(tmppath, &s);
+
+		if (S_ISDIR(s.st_mode)) {
+			flag = 0;
+			for(int i = 0; i<key_count; i++)
+				if (!strcmp(ent->d_name, key_list[i]))
+					flag = i+1;
+
+			if (!flag)
+				remove_dir(tmppath);
+			else
+				key_check[flag-1] = 1;
+		}
+		else 
+			continue;
+	}
+
+	for(int i = 0; i<key_count; i++)
+		if (!key_check[i]) {
+			sprintf(tmppath, "%s/%s", pd, key_list[i]);
+			printf("%s\n", tmppath);
+			mkdir(tmppath, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH); 
+		}
+
 	umask(0);
+	init_over = 1;
+
 	return fuse_main(2, argv, &xmp_oper, NULL);
 }
